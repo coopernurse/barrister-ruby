@@ -21,6 +21,14 @@ module Barrister
   end
   module_function :contract_from_file
 
+  def parse_method(method)
+    pos  = method.index(".")
+    iface_name = method.slice(0, pos)
+    func_name  = method.slice(pos+1, method.length)
+    return iface_name, func_name
+  end
+  module_function :parse_method
+
   class RpcException < StandardError
 
     attr_accessor :code, :message, :data
@@ -41,7 +49,7 @@ module Barrister
     end
 
     def request(req)
-      json_str = JSON::generate(req)
+      json_str = JSON::generate(req, { :ascii_only=>true })
       http    = Net::HTTP.new(@uri.host, @uri.port)
       request = Net::HTTP::Post.new(@uri.request_uri)
       request.body = json_str
@@ -74,7 +82,7 @@ module Barrister
     def handle_json(json_str)
       req  = JSON::parse(json_str)
       resp = handle(req)
-      return JSON::generate(resp)
+      return JSON::generate(resp, { :ascii_only=>true })
     end
 
     def handle(req)
@@ -102,9 +110,7 @@ module Barrister
       puts req
       puts "method=#{method}"
 
-      pos  = method.index(".")
-      iface_name = method.slice(0, pos)
-      func_name  = method.slice(pos+1, method.length)
+      iface_name, func_name = Barrister::parse_method(method)
 
       params = [ ]
       if req["params"]
@@ -178,15 +184,25 @@ module Barrister
       end
     end
 
+    def request(method, params)
+      req = { "jsonrpc" => "2.0", "id" => Barrister::rand_str(22), "method" => method }
+      if params
+        req["params"] = params
+      end
+      return @trans.request(req)
+    end
+
   end
 
   class RpcResponse
 
-    attr_accessor :id, :result, :error
+    attr_accessor :id, :method, :params, :result, :error
 
-    def initialize(resp)
+    def initialize(req, resp)
       @id     = resp["id"]
       @result = resp["result"]
+      @method = req["method"]
+      @params = req["params"]
 
       if resp["error"]
         e = resp["error"]
@@ -255,7 +271,7 @@ module Barrister
           msg = "No result for request id: #{id}"
           resp = { "id" => id, "error" => { "code"=>-32603, "message" => msg } }
         end
-        sorted << RpcResponse.new(resp)
+        sorted << RpcResponse.new(req, resp)
       end
 
       return sorted
@@ -270,11 +286,7 @@ module Barrister
       iface.functions.each do |f|
         method = iface.name + "." + f.name
         singleton.send :define_method, f.name do |*args|
-          req = { "jsonrpc" => "2.0", "id" => Barrister::rand_str(22), "method" => method }
-          if args and args.length > 0
-            req["params"] = args
-          end
-          resp = client.trans.request(req)
+          resp = client.request(method, args)
           if client.trans.instance_of? BatchTransport
             return nil
           else
