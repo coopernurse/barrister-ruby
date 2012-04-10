@@ -12,6 +12,15 @@ module Barrister
   end
   module_function :rand_str
 
+  def contract_from_file(fname)
+    file = File.open(fname, "r")
+    contents = file.read
+    file.close
+    idl = JSON::parse(contents)
+    return Contract.new(idl)
+  end
+  module_function :contract_from_file
+
   class RpcException < StandardError
 
     attr_accessor :code, :message, :data
@@ -33,7 +42,7 @@ module Barrister
 
     def request(req)
       json_str = JSON::generate(req)
-      http = Net::HTTP.new(@uri.host, @uri.port)
+      http    = Net::HTTP.new(@uri.host, @uri.port)
       request = Net::HTTP::Post.new(@uri.request_uri)
       request.body = json_str
       request["Content-Type"] = "application/json"
@@ -43,6 +52,94 @@ module Barrister
       else
         return JSON::parse(response.body)
       end
+    end
+
+  end
+
+  class Server
+
+    def initialize(contract)
+      @contract = contract
+      @handlers = { }
+    end
+
+    def add_handler(iface_name, handler)
+      iface = @contract.interface(iface_name)
+      if !iface
+        raise "No interface found with name: #{iface_name}"
+      end
+      @handlers[iface_name] = handler
+    end
+
+    def handle_json(json_str)
+      req  = JSON::parse(json_str)
+      resp = handle(req)
+      return JSON::generate(resp)
+    end
+
+    def handle(req)
+      if req.kind_of?(Array)
+        resp_list = [ ]
+        req.each do |r|
+          resp_list << handle_single(r)
+        end
+        return resp_list
+      else
+        return handle_single(req)
+      end
+    end
+
+    def handle_single(req)
+      method = req["method"]
+      if !method
+        return err_resp(req, -32600, "No method provided on request")
+      end
+
+      if method == "barrister-idl"
+        return ok_resp(req, @contract.idl)
+      end
+
+      puts req
+      puts "method=#{method}"
+
+      pos  = method.index(".")
+      iface_name = method.slice(0, pos)
+      func_name  = method.slice(pos+1, method.length)
+
+      params = [ ]
+      if req["params"]
+        params = req["params"]
+      end
+
+      handler = @handlers[iface_name]
+      begin 
+        resp = handler.send(func_name, *params)
+        return ok_resp(req, resp)
+      rescue RpcException => e
+        return err_resp(req, e.code, e.message, e.data)
+      rescue => e
+        return err_resp(req, -32000, "Unknown error: #{e}")
+      end
+    end
+
+    def ok_resp(req, result)
+      resp = { "jsonrpc"=>"2.0", "result"=>result }
+      if req["id"]
+        resp["id"] = req["id"]
+      end
+      return resp
+    end
+
+    def err_resp(req, code, message, data=nil)
+      resp = { "jsonrpc"=>"2.0", "error"=> { "code"=>code, "message"=>message } }
+      if req["id"]
+        resp["id"] = req["id"]
+      end
+      if data
+        resp["error"]["data"] = data
+      end
+
+      return resp
     end
 
   end
@@ -196,6 +293,8 @@ module Barrister
 
   class Contract
 
+    attr_accessor :idl
+
     def initialize(idl)
       @idl = idl
       @interfaces = { }
@@ -208,6 +307,10 @@ module Barrister
           @interfaces[item["name"]] = Interface.new(item)
         end
       end
+    end
+
+    def interface(name)
+      return @interfaces[name]
     end
 
     def interfaces
