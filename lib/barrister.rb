@@ -7,7 +7,10 @@ module Barrister
   def rand_str(len)
     rchars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghiklmnopqrstuvwxyz"
     s = ""
-    len.times { s += rchars[rand(rchars.length)] }
+    len.times do ||
+        pos = rand(rchars.length)
+        s += rchars[pos,1]
+    end
     return s
   end
   module_function :rand_str
