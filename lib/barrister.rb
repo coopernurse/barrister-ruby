@@ -26,9 +26,13 @@ module Barrister
 
   def parse_method(method)
     pos  = method.index(".")
-    iface_name = method.slice(0, pos)
-    func_name  = method.slice(pos+1, method.length)
-    return iface_name, func_name
+    if pos == nil
+      return nil, method
+    else
+      iface_name = method.slice(0, pos)
+      func_name  = method.slice(pos+1, method.length)
+      return iface_name, func_name
+    end
   end
   module_function :parse_method
 
@@ -83,8 +87,12 @@ module Barrister
     end
 
     def handle_json(json_str)
-      req  = JSON::parse(json_str)
-      resp = handle(req)
+      begin
+        req  = JSON::parse(json_str)
+        resp = handle(req)
+      rescue JSON::ParserError => e
+        resp = err_resp({ }, -32700, "Unable to parse JSON: #{e.message}")
+      end
       return JSON::generate(resp, { :ascii_only=>true })
     end
 
@@ -114,16 +122,47 @@ module Barrister
       puts "method=#{method}"
 
       iface_name, func_name = Barrister::parse_method(method)
+      if iface_name == nil
+        return err_resp(req, -32601, "Method not found: #{method}")
+      end
 
       params = [ ]
       if req["params"]
         params = req["params"]
       end
+      
+      iface = @contract.interface(iface_name)
+      if !iface
+        return err_resp(req, -32601, "Interface not found on IDL: #{iface_name}")
+      end
+
+      func = iface.function(func_name)
+      if !func
+        return err_resp(req, -32601, "Function #{func_name} does not exist on interface #{iface_name}")
+      end
+
+      code, err_msg = validate_params(func, params)
+      if code != nil
+        return err_resp(req, code, err_msg)
+      end
 
       handler = @handlers[iface_name]
+      if !handler
+        return err_resp(req, -32000, "Server error. No handler is bound to interface #{iface_name}")
+      end
+
+      if !handler.respond_to?(func_name)
+        return err_resp(req, -32000, "Server error. Handler for #{iface_name} does not implement #{func_name}")
+      end
+
       begin 
-        resp = handler.send(func_name, *params)
-        return ok_resp(req, resp)
+        result  = handler.send(func_name, *params)
+        invalid = @contract.validate("", func.returns, func.returns["is_array"], result)
+        if invalid == nil
+          return ok_resp(req, result)
+        else
+          return err_resp(req, -32001, invalid)
+        end
       rescue RpcException => e
         return err_resp(req, e.code, e.message, e.data)
       rescue => e
@@ -149,6 +188,26 @@ module Barrister
       end
 
       return resp
+    end
+
+    def validate_params(func, params)
+      e_params  = func.params.length
+      r_params  = params.length
+      if e_params != r_params
+        func_name = func.name
+        return -32602, "Function #{func_name}: Param length #{r_params} != expected length: #{e_params}"
+      end
+
+      for i in (0..(e_params-1))
+        expected = func.params[i]
+        invalid = @contract.validate("Param[#{i}]", expected, expected["is_array"], params[i])
+        if invalid != nil
+          return -32602, invalid
+        end
+      end
+
+      # valid
+      return nil, nil
     end
 
   end
@@ -261,7 +320,7 @@ module Barrister
       end
 
       resp_list = @parent.trans.request(requests)
-      sorted = [ ]
+      sorted    = [ ]
       by_req_id = { }
       resp_list.each do |resp|
         by_req_id[resp["id"]] = resp
@@ -320,6 +379,10 @@ module Barrister
         type = item["type"]
         if type == "interface"
           @interfaces[item["name"]] = Interface.new(item)
+        elsif type == "struct"
+          @structs[item["name"]] = item
+        elsif type == "enum"
+          @enums[item["name"]] = item
         end
       end
     end
@@ -330,6 +393,120 @@ module Barrister
 
     def interfaces
       return @interfaces.values
+    end
+
+    def validate(name, expected, expect_array, val)
+      if val == nil
+        if expected["optional"]
+          return nil
+        else
+          return "#{name} cannot be null"
+        end
+      else
+        exp_type = expected["type"]
+
+        if expect_array
+          if val.kind_of?(Array)
+            stop = val.length - 1
+            for i in (0..stop)
+              invalid = validate("#{name}[#{i}]", expected, false, val[i])
+              if invalid != nil
+                return invalid
+              end
+            end
+
+            return nil
+          else
+            return type_err(name, "[]"+expected["type"], val)
+          end
+        elsif exp_type == "string"
+          if val.class == String
+            return nil
+          else
+            return type_err(name, exp_type, val)
+          end
+        elsif exp_type == "bool"
+          if val.class == TrueClass || val.class == FalseClass
+            return nil
+          else
+            return type_err(name, exp_type, val)
+          end
+        elsif exp_type == "int" || exp_type == "float"
+          if val.class == Integer || val.class == Fixnum || val.class == Bignum
+            return nil
+          elsif val.class == Float && exp_type == "float"
+            return nil
+          else
+            return type_err(name, exp_type, val)
+          end
+        else
+          struct = @structs[exp_type]
+          if struct
+            if !val.kind_of?(Hash)
+              return "#{name} #{exp_type} value must be a map/hash. not: " + val.class.name
+            end
+            
+            s_field_keys = { }
+            
+            s_fields = all_struct_fields([], struct)
+            s_fields.each do |f|
+              fname = f["name"]
+              invalid = validate("#{name}.#{fname}", f, f["is_array"], val[fname])
+              if invalid != nil
+                return invalid
+              end
+              s_field_keys[fname] = 1
+            end
+            
+            val.keys.each do |k|
+              if !s_field_keys.key?(k)
+                return "#{name}.#{k} is not a field in struct '#{exp_type}'"
+              end
+            end
+            
+            # valid struct value
+            return nil
+          end
+
+          enum = @enums[exp_type]
+          if enum
+            if val.class != String
+              return "#{name} enum value must be a string. got: " + val.class.name
+            end
+
+            enum["values"].each do |en|
+              if en["value"] == val
+                return nil
+              end
+            end
+
+            return "#{name} #{val} is not a value in enum '#{exp_type}'"
+          end
+
+          return "#{name} unknown type: #{exp_type}"
+        end
+
+      end
+    end
+
+    def all_struct_fields(arr, struct)
+      struct["fields"].each do |f|
+        arr << f
+      end
+
+      if struct["extends"]
+        parent = @structs[struct["extends"]]
+        if parent
+          return all_struct_fields(arr, parent)
+        end
+      end
+
+      return arr
+    end
+
+    def type_err(name, exp_type, val)
+      actual = val.class.name
+      return "#{name} expects type '#{exp_type}' but got type '#{actual}'"
     end
 
   end
