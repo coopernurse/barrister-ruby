@@ -5,7 +5,7 @@ require "uri"
 module Barrister
 
   def rand_str(len)
-    rchars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghiklmnopqrstuvwxyz"
+    rchars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
     s = ""
     len.times do ||
         pos = rand(rchars.length)
