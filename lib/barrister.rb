@@ -35,6 +35,26 @@ module Barrister
     end
   end
   module_function :parse_method
+  
+  def ok_resp(req, result)
+    resp = { "jsonrpc"=>"2.0", "result"=>result }
+    if req["id"]
+      resp["id"] = req["id"]
+    end
+    return resp
+  end
+
+  def err_resp(req, code, message, data=nil)
+    resp = { "jsonrpc"=>"2.0", "error"=> { "code"=>code, "message"=>message } }
+    if req["id"]
+      resp["id"] = req["id"]
+    end
+    if data
+      resp["error"]["data"] = data
+    end
+
+    return resp
+  end
 
   class RpcException < StandardError
 
@@ -72,6 +92,7 @@ module Barrister
   end
 
   class Server
+    include Barrister
 
     def initialize(contract)
       @contract = contract
@@ -118,106 +139,58 @@ module Barrister
         return ok_resp(req, @contract.idl)
       end
 
-      puts req
-      puts "method=#{method}"
-
-      iface_name, func_name = Barrister::parse_method(method)
-      if iface_name == nil
-        return err_resp(req, -32601, "Method not found: #{method}")
+      err_resp, iface, func = @contract.resolve_method(req)
+      if err_resp != nil
+        return err_resp
       end
-
+      
+      err_resp = @contract.validate_params(req, func)
+      if err_resp != nil
+        return err_resp
+      end
+      
       params = [ ]
       if req["params"]
         params = req["params"]
       end
-      
-      iface = @contract.interface(iface_name)
-      if !iface
-        return err_resp(req, -32601, "Interface not found on IDL: #{iface_name}")
-      end
 
-      func = iface.function(func_name)
-      if !func
-        return err_resp(req, -32601, "Function #{func_name} does not exist on interface #{iface_name}")
-      end
-
-      code, err_msg = validate_params(func, params)
-      if code != nil
-        return err_resp(req, code, err_msg)
-      end
-
-      handler = @handlers[iface_name]
+      handler = @handlers[iface.name]
       if !handler
-        return err_resp(req, -32000, "Server error. No handler is bound to interface #{iface_name}")
+        return err_resp(req, -32000, "Server error. No handler is bound to interface #{iface.name}")
       end
 
-      if !handler.respond_to?(func_name)
-        return err_resp(req, -32000, "Server error. Handler for #{iface_name} does not implement #{func_name}")
+      if !handler.respond_to?(func.name)
+        return err_resp(req, -32000, "Server error. Handler for #{iface.name} does not implement #{func.name}")
       end
 
       begin 
-        result  = handler.send(func_name, *params)
-        invalid = @contract.validate("", func.returns, func.returns["is_array"], result)
-        if invalid == nil
-          return ok_resp(req, result)
+        result  = handler.send(func.name, *params)
+        err_resp = @contract.validate_result(req, result, func)
+        if err_resp != nil
+            return err_resp
         else
-          return err_resp(req, -32001, invalid)
+          return ok_resp(req, result)
         end
       rescue RpcException => e
         return err_resp(req, e.code, e.message, e.data)
       rescue => e
+        puts e.inspect
+        puts e.backtrace
         return err_resp(req, -32000, "Unknown error: #{e}")
       end
-    end
-
-    def ok_resp(req, result)
-      resp = { "jsonrpc"=>"2.0", "result"=>result }
-      if req["id"]
-        resp["id"] = req["id"]
-      end
-      return resp
-    end
-
-    def err_resp(req, code, message, data=nil)
-      resp = { "jsonrpc"=>"2.0", "error"=> { "code"=>code, "message"=>message } }
-      if req["id"]
-        resp["id"] = req["id"]
-      end
-      if data
-        resp["error"]["data"] = data
-      end
-
-      return resp
-    end
-
-    def validate_params(func, params)
-      e_params  = func.params.length
-      r_params  = params.length
-      if e_params != r_params
-        func_name = func.name
-        return -32602, "Function #{func_name}: Param length #{r_params} != expected length: #{e_params}"
-      end
-
-      for i in (0..(e_params-1))
-        expected = func.params[i]
-        invalid = @contract.validate("Param[#{i}]", expected, expected["is_array"], params[i])
-        if invalid != nil
-          return -32602, invalid
-        end
-      end
-
-      # valid
-      return nil, nil
     end
 
   end
 
   class Client
+    include Barrister
 
     attr_accessor :trans
 
-    def initialize(trans)
+    def initialize(trans, validate_req=true, validate_result=true)
       @trans = trans
+      @validate_req    = validate_req
+      @validate_result = validate_result
       load_contract
       init_proxies
     end
@@ -251,7 +224,28 @@ module Barrister
       if params
         req["params"] = params
       end
-      return @trans.request(req)
+      
+      err_resp, iface, func = @contract.resolve_method(req)
+      if err_resp != nil
+        return err_resp
+      end
+        
+      if @validate_req
+        err_resp = @contract.validate_params(req, func)
+        if err_resp != nil
+          return err_resp
+        end
+      end
+      
+      resp = @trans.request(req)
+      if @validate_result && resp != nil && resp.key?("result")
+        err_resp = @contract.validate_result(req, resp["result"], func)
+        if err_resp != nil
+          resp = err_resp
+        end
+      end
+      
+      return resp
     end
 
   end
@@ -366,6 +360,7 @@ module Barrister
   end
 
   class Contract
+    include Barrister
 
     attr_accessor :idl
 
@@ -393,6 +388,59 @@ module Barrister
 
     def interfaces
       return @interfaces.values
+    end
+    
+    def resolve_method(req)
+      method = req["method"]
+      iface_name, func_name = Barrister::parse_method(method)
+      if iface_name == nil
+        return err_resp(req, -32601, "Method not found: #{method}")
+      end
+      
+      iface = interface(iface_name)
+      if !iface
+        return err_resp(req, -32601, "Interface not found on IDL: #{iface_name}")
+      end
+
+      func = iface.function(func_name)
+      if !func
+        return err_resp(req, -32601, "Function #{func_name} does not exist on interface #{iface_name}")
+      end
+      
+      return nil, iface, func
+    end
+    
+    def validate_params(req, func)
+      params = req["params"]
+      if !params
+        params = []
+      end
+      e_params  = func.params.length
+      r_params  = params.length
+      if e_params != r_params
+        msg = "Function #{func.name}: Param length #{r_params} != expected length: #{e_params}"
+        return err_resp(req, -32602, msg)
+      end
+
+      for i in (0..(e_params-1))
+        expected = func.params[i]
+        invalid = validate("Param[#{i}]", expected, expected["is_array"], params[i])
+        if invalid != nil
+          return err_resp(req, -32602, invalid)
+        end
+      end
+
+      # valid
+      return nil
+    end
+    
+    def validate_result(req, result, func)
+      invalid = validate("", func.returns, func.returns["is_array"], result)
+      if invalid == nil
+        return nil
+      else
+        return err_resp(req, -32001, invalid)
+      end
     end
 
     def validate(name, expected, expect_array, val)
