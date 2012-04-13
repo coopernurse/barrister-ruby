@@ -290,6 +290,13 @@ module Barrister
       load_contract
       init_proxies
     end
+
+    # Returns the hash of metadata from the Contract, which includes the date the
+    # IDL was translated to JSON, the Barrister version used to translate the IDL, and
+    # a checksum of the IDL which can be used to detect version changes.
+    def get_meta
+      return @contract.meta
+    end
    
     # Returns a Barrister::BatchClient instance that is associated with this Client instance
     #
@@ -563,7 +570,7 @@ module Barrister
   class Contract
     include Barrister
 
-    attr_accessor :idl
+    attr_accessor :idl, :meta
 
     # `idl` must be an Array loaded from a Barrister IDL JSON file
     #
@@ -574,6 +581,7 @@ module Barrister
       @interfaces = { }
       @structs    = { }
       @enums      = { }
+      @meta       = { }
 
       idl.each do |item|
         type = item["type"]
@@ -583,6 +591,12 @@ module Barrister
           @structs[item["name"]] = item
         elsif type == "enum"
           @enums[item["name"]] = item
+        elsif type == "meta"
+          item.keys.each do |key|
+            if key != "type"
+              @meta[key] = item[key]
+            end
+          end
         end
       end
     end
