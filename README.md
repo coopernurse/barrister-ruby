@@ -105,3 +105,20 @@ Depends on the `json` gem.
 * [Annotated source](http://barrister.bitmechanic.com/api/ruby/latest/barrister.html)
 * [Barrister site](http://barrister.bitmechanic.com/) - Includes examples
 * [IDL docs](http://barrister.bitmechanic.com/docs.html) - How to write an IDL and convert to JSON
+
+## License
+
+Distributed under the MIT license.  See LICENSE file for details.
+
+## Release / Tag notes
+
+Note to self on how to tag release
+
+    # Edit `barrister.gemspec`, bump version and date, then run:
+    
+    make all
+    git add -u
+    git commit -m "bump gem v0.1.0"
+    git tag -a v0.1.0 -m "version 0.1.0"
+    git push --tags
+    make publish
