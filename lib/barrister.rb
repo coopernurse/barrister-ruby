@@ -395,6 +395,7 @@ module Barrister
     def request(req)
       json_str = JSON::generate(req, { :ascii_only=>true })
       http    = Net::HTTP.new(@uri.host, @uri.port)
+      http.use_ssl = (@uri.scheme == 'https')
       request = Net::HTTP::Post.new(@uri.request_uri)
       request.body = json_str
       request["Content-Type"] = "application/json"
