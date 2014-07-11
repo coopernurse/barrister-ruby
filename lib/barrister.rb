@@ -19,6 +19,7 @@ require "json"
 # You can write your own transport class if you want to use another lib
 # such as typhoeus.  Transports are designed to be pluggable.
 require "net/http"
+require "net/https"
 require "uri"
 
 ### Barrister Module
